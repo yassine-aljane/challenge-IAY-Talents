@@ -24,16 +24,19 @@ from orchestrator.graph import new_thread_id, run_phase_a, run_phase_b  # noqa: 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Autonomous Job Application Agent (CLI fallback)")
-    parser.add_argument("--resume", required=True, help="Path to a PDF resume")
+    parser.add_argument("--resume", required=True, help="Path to a resume file (PDF or image)")
     parser.add_argument("--title", required=True, help="Desired job title")
     parser.add_argument("--location", default="", help="Optional location filter")
     args = parser.parse_args()
 
-    pdf_bytes = Path(args.resume).read_bytes()
+    resume_path = Path(args.resume)
+    pdf_bytes = resume_path.read_bytes()
     thread_id = new_thread_id()
 
     print("Running Phase A...", file=sys.stderr)
-    result = asyncio.run(run_phase_a(pdf_bytes, args.title, args.location, thread_id))
+    result = asyncio.run(
+        run_phase_a(pdf_bytes, args.title, args.location, thread_id, resume_filename=resume_path.name)
+    )
 
     if result.get("error"):
         print(f"Error: {result['error']}", file=sys.stderr)

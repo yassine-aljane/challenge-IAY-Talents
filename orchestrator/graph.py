@@ -31,12 +31,15 @@ from agents.cover_letter import generate_cover_letter
 from agents.job_search import search_jobs
 from agents.matching import evaluate_matches
 from agents.profile_extraction import extract_profile
+from common import metrics
+from common.harness import run_agent
 from common.logging_utils import log_message
 from schemas.models import CoverLetterRequest, JobPosting, ProfileSchema
 
 
 class AgentState(TypedDict, total=False):
-    pdf_bytes: bytes
+    pdf_bytes: bytes          # raw resume file bytes (PDF or image)
+    resume_filename: str      # original filename, used to route multimodal ingestion
     desired_title: str
     location: str
     profile: Optional[dict]
@@ -48,10 +51,19 @@ class AgentState(TypedDict, total=False):
     error: Optional[str]
 
 
+async def _extract_profile_async(pdf_bytes: bytes, filename: str):
+    return await asyncio.to_thread(extract_profile, pdf_bytes, filename)
+
+
 async def _node_extract_profile(state: AgentState) -> dict:
     trace = state.get("trace", [])
     try:
-        profile = await asyncio.to_thread(extract_profile, state["pdf_bytes"])
+        profile = await run_agent(
+            "ProfileExtractionAgent",
+            _extract_profile_async,
+            state["pdf_bytes"],
+            state.get("resume_filename", "resume.pdf"),
+        )
     except Exception as e:
         log_message(trace, "Orchestrator", "ProfileExtractionAgent", "error", str(e))
         return {"trace": trace, "error": f"Profile extraction failed: {e}"}
@@ -63,7 +75,9 @@ async def _node_search_jobs(state: AgentState) -> dict:
     trace = state.get("trace", [])
     profile = ProfileSchema(**state["profile"])
     try:
-        jobs = await search_jobs(profile, state["desired_title"], state.get("location", ""))
+        jobs = await run_agent(
+            "JobSearchAgent", search_jobs, profile, state["desired_title"], state.get("location", "")
+        )
     except Exception as e:
         log_message(trace, "Orchestrator", "JobSearchAgent", "error", str(e))
         return {"trace": trace, "error": f"Job search failed: {e}"}
@@ -78,7 +92,9 @@ async def _node_evaluate_matches(state: AgentState) -> dict:
     if not jobs:
         return {"ranked_results": [], "trace": trace, "error": "No job postings were found for this title/location."}
     try:
-        results = await asyncio.to_thread(evaluate_matches, profile, jobs)
+        results = await run_agent(
+            "MatchingAgent", asyncio.to_thread, evaluate_matches, profile, jobs
+        )
     except Exception as e:
         log_message(trace, "Orchestrator", "MatchingAgent", "error", str(e))
         return {"trace": trace, "error": f"Matching failed: {e}"}
@@ -99,7 +115,9 @@ async def _node_generate_cover_letter(state: AgentState) -> dict:
     log_message(trace, "Orchestrator", "CoverLetterAgent", "CoverLetterRequest", request)
 
     try:
-        result = await asyncio.to_thread(generate_cover_letter, request)
+        result = await run_agent(
+            "CoverLetterAgent", asyncio.to_thread, generate_cover_letter, request
+        )
     except Exception as e:
         log_message(trace, "Orchestrator", "CoverLetterAgent", "error", str(e))
         return {"trace": trace, "error": f"Cover letter generation failed: {e}"}
@@ -138,16 +156,25 @@ def new_thread_id() -> str:
     return str(uuid.uuid4())
 
 
-async def run_phase_a(pdf_bytes: bytes, desired_title: str, location: str, thread_id: str) -> AgentState:
+async def run_phase_a(
+    pdf_bytes: bytes,
+    desired_title: str,
+    location: str,
+    thread_id: str,
+    resume_filename: str = "resume.pdf",
+) -> AgentState:
     """Extraction -> Search -> Matching. Stops at the interrupt point."""
     config = {"configurable": {"thread_id": thread_id}}
     initial_state: AgentState = {
         "pdf_bytes": pdf_bytes,
+        "resume_filename": resume_filename,
         "desired_title": desired_title,
         "location": location,
         "trace": [],
     }
-    return await _GRAPH.ainvoke(initial_state, config)
+    result = await _GRAPH.ainvoke(initial_state, config)
+    metrics.registry.print_summary("PHASE A METRICS (console only)")
+    return result
 
 
 async def run_phase_b(thread_id: str, selected_job_id: str) -> AgentState:
@@ -155,4 +182,6 @@ async def run_phase_b(thread_id: str, selected_job_id: str) -> AgentState:
     the Cover Letter Agent."""
     config = {"configurable": {"thread_id": thread_id}}
     await _GRAPH.aupdate_state(config, {"selected_job_id": selected_job_id})
-    return await _GRAPH.ainvoke(None, config)
+    result = await _GRAPH.ainvoke(None, config)
+    metrics.registry.print_summary("PHASE A+B METRICS (console only)")
+    return result

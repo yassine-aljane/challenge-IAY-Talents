@@ -87,7 +87,11 @@ class JobPosting(BaseModel):
     @field_validator("url", mode="before")
     @classmethod
     def _cap_url(cls, v):
-        return _clamp("" if v is None else str(v), 500)
+        # OWASP LLM02 (insecure output handling): job APIs are untrusted --
+        # drop any non-http(s) URL (javascript:, data:, file:, ...) at the
+        # schema boundary so it can never reach the UI.
+        url = _clamp("" if v is None else str(v), 500)
+        return url if url.startswith(("https://", "http://")) else ""
 
 
 class MatchResult(BaseModel):

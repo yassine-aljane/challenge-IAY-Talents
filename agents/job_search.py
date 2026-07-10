@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from common.harness import run_agent_sync
 from common.llm_client import chat_json
 from mcp_server.client import call_search_jobs
 from schemas.models import JobPosting, ProfileSchema
@@ -60,7 +61,11 @@ async def search_jobs(profile: ProfileSchema, desired_title: str, location: str 
     if not raw_query:
         raise ValueError("A desired job title (or a past title on the profile) is required to search for jobs.")
 
-    query = await asyncio.to_thread(_normalize_query, raw_query)
+    # Subagent: a small single-purpose LLM helper run through the harness so
+    # it is metered and traced like every other agent.
+    query = await asyncio.to_thread(
+        run_agent_sync, "QueryNormalizerSubagent", _normalize_query, raw_query, quiet=True
+    )
     raw_results = await call_search_jobs(query=query, location=location, max_results=MAX_JOBS)
 
     # Last-resort broadening: if even the normalized query found nothing,

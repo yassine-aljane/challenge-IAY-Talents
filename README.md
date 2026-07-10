@@ -10,6 +10,19 @@ It demonstrates:
 - **MCP** (Model Context Protocol) as the transport for the job-search tool.
 - **Human-in-the-loop orchestration** via a real LangGraph interrupt between
   "show me ranked matches" and "write the cover letter for this one."
+- **Harness / hooks / subagents**: every agent runs through a uniform
+  execution harness (`common/harness.py`) with lifecycle hooks
+  (before/after/error) doing logging + metrics; small single-purpose
+  subagents (query normalizer, per-job match scorer) run through the same
+  harness.
+- **Multimodal resume ingestion**: PDFs are parsed as text; images in any
+  common format (photo or scan of a resume) are read by the Groq vision
+  model.
+- **Observability & evaluation**: per-agent latency + token metrics printed
+  to the console after each phase, LangSmith tracing of the whole graph and
+  every LLM call, and an offline LLM-as-judge evaluation script.
+- **Security**: 4 rules from the OWASP Top 10 for LLM Applications,
+  documented in [SECURITY.md](SECURITY.md).
 
 ## Architecture
 
@@ -112,6 +125,26 @@ python scripts/test_job_search.py "data analyst" "Paris"
 python scripts/test_profile_extraction.py
 ```
 
+**Performance evaluation (console only, not in the UI):**
+```bash
+python scripts/evaluate_langsmith.py sample_data/sample_resume.pdf "Data Analyst"
+```
+Prints three layers: per-agent latency + LLM token metrics, ranking
+statistics (embedding vs LLM-judge score agreement), and an LLM-as-judge
+pass that checks each match rationale is grounded (not hallucinated). When
+LangSmith tracing is enabled, the full evaluation (pipeline + every judge
+call) also appears as a run tree in the LangSmith UI.
+
+**LangSmith tracing (optional):** set `LANGSMITH_TRACING=true` and
+`LANGSMITH_API_KEY` in `.env` (free account at
+[smith.langchain.com](https://smith.langchain.com)) to see the full
+LangGraph run tree -- graph nodes, harness agent spans, and every Groq call
+-- in the LangSmith UI.
+
+**API-key fallback:** set `GROQ_API_KEYS=key1,key2,...` instead of a single
+`GROQ_API_KEY` and the LLM client automatically rotates to the next key when
+one hits its rate limit.
+
 ## Data schemas
 
 See `schemas/models.py` for the full definitions:
@@ -155,7 +188,8 @@ deferred, since the assignment calls for it:
 
 ## Limitations / out of scope
 
-- No OCR: only digital, text-based PDF resumes are supported.
+- No OCR library: text-based PDFs are parsed locally; scanned/photo resumes
+  must be uploaded as images, which are read by the vision model instead.
 - No feedback/RLHF loop (e.g. learning from which cover letters the user
   liked) -- explicitly out of scope for this POC. A natural next step would
   be logging user selections/edits and using them to fine-tune the Matching

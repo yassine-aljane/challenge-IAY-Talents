@@ -17,6 +17,7 @@ combined_score is a 50/50 blend of the two, used to sort the final list.
 from __future__ import annotations
 
 from common.embeddings import cosine_similarity
+from common.harness import run_agent_sync
 from common.llm_client import chat_json
 from common.security import MAX_JOB_DESC_CHARS, clamp_text, untrusted_block
 from schemas.models import JobPosting, MatchResult, ProfileSchema
@@ -67,7 +68,12 @@ def evaluate_matches(profile: ProfileSchema, jobs: list[JobPosting]) -> list[Mat
 
     for job in jobs:
         similarity = cosine_similarity(profile_text, f"{job.title}\n{job.description}")
-        llm_score, rationale = _score_with_llm(profile_text, job)
+        # Subagent: one LLM-judge call per posting, run through the harness
+        # (quiet -- 15 postings would flood the console) so each call is
+        # still metered and traced.
+        llm_score, rationale = run_agent_sync(
+            "MatchScoringSubagent", _score_with_llm, profile_text, job, quiet=True
+        )
         combined = 0.5 * similarity + 0.5 * (llm_score / 100)
         results.append(
             MatchResult(

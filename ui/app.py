@@ -153,7 +153,11 @@ st.markdown(
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### 📄 Your application")
-    resume_file = st.file_uploader("Resume (PDF)", type=["pdf"], help="Digital/text-based PDF only, no scans.")
+    resume_file = st.file_uploader(
+        "Resume (PDF or image)",
+        type=["pdf", "png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"],
+        help="PDF resumes are parsed as text; images (including photos/scans) are read by the vision model.",
+    )
     desired_title = st.text_input("Desired job title", placeholder="e.g. Data Analyst, développeur web…")
     location = st.text_input("Location (optional)", placeholder="e.g. Paris, Remote…")
 
@@ -181,7 +185,15 @@ if run_clicked and resume_file and desired_title:
         st.write("🔍 Extracting your profile from the resume…")
         pdf_bytes = resume_file.read()
         try:
-            result = asyncio.run(run_phase_a(pdf_bytes, desired_title, location, st.session_state.thread_id))
+            result = asyncio.run(
+                run_phase_a(
+                    pdf_bytes,
+                    desired_title,
+                    location,
+                    st.session_state.thread_id,
+                    resume_filename=resume_file.name,
+                )
+            )
             st.session_state.phase_a_result = result
             st.session_state.cover_letter = None
             if result.get("error"):
@@ -242,7 +254,11 @@ else:
             source = html.escape(job.get("source", ""))
             rationale = html.escape(r["rationale"])
             url = job["url"]
-            link = f' · <a href="{html.escape(url)}" target="_blank">View posting ↗</a>' if url else ""
+            # OWASP LLM02 (insecure output handling): only render http(s)
+            # links -- a malicious posting could otherwise inject e.g. a
+            # javascript: URL through the job API.
+            safe_url = url if url.startswith(("https://", "http://")) else ""
+            link = f' · <a href="{html.escape(safe_url)}" target="_blank">View posting ↗</a>' if safe_url else ""
 
             st.markdown(
                 f"""
@@ -302,4 +318,11 @@ else:
     with st.expander("🔬 Agent collaboration trace (inter-agent messages)"):
         for entry in result.get("trace", []):
             st.markdown(f"**#{entry['step']} {entry['from_agent']} → {entry['to_agent']}** · `{entry['schema']}`")
-            st.json(entry["preview"])
+            preview = entry["preview"]
+            # st.json() only accepts JSON-shaped data; plain-string previews
+            # (e.g. "15 postings") must be rendered as text or they raise a
+            # client-side JSON parse error.
+            if isinstance(preview, (dict, list)):
+                st.json(preview)
+            else:
+                st.code(str(preview), language=None)

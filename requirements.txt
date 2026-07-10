@@ -9,3 +9,5 @@ python-dotenv>=1.0.1
 streamlit>=1.37.0
 requests>=2.32.0
 numpy>=1.26.4
+Pillow>=10.4.0
+langsmith>=0.1.140
