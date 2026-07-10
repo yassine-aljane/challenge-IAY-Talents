@@ -67,6 +67,17 @@ requirements absent from the job description.
 
 Return strict JSON: {"verdict": "grounded" or "ungrounded", "reason": "one short sentence"}"""
 
+_FAITHFULNESS_SYSTEM_PROMPT = """You are an impartial evaluator of a cover letter.
+
+You will receive a candidate profile (the ONLY facts the candidate actually has) and a cover
+letter written for them.
+
+Judge whether the cover letter is faithful: it must NOT claim any skill, experience,
+certification, or credential that is absent from the profile. Reasonable phrasing/enthusiasm is
+fine; inventing facts is not.
+
+Return strict JSON: {"verdict": "faithful" or "unfaithful", "reason": "one short sentence"}"""
+
 
 @traceable(run_type="chain", name="eval.rationale_groundedness")
 def _judge_rationale(profile_summary: str, job_description: str, rationale: str) -> str:
@@ -83,18 +94,50 @@ def _judge_rationale(profile_summary: str, job_description: str, rationale: str)
         return "error"
 
 
+@traceable(run_type="chain", name="eval.cover_letter_faithfulness")
+def _judge_cover_letter(profile: dict, letter_text: str) -> str:
+    profile_facts = (
+        f"Skills: {', '.join(profile.get('skills', []))}\n"
+        f"Past titles: {', '.join(profile.get('past_titles', []))}\n"
+        f"Education: {', '.join(profile.get('education', []))}\n"
+        f"Certifications: {', '.join(profile.get('certifications', []))}\n"
+        f"Years experience: {profile.get('years_experience')}"
+    )
+    user_prompt = f"Candidate profile:\n{profile_facts}\n\nCover letter:\n{letter_text}"
+    try:
+        data = chat_json(_FAITHFULNESS_SYSTEM_PROMPT, user_prompt, max_tokens=120)
+        verdict = str(data.get("verdict", "")).strip().lower()
+        return verdict if verdict in ("faithful", "unfaithful") else "error"
+    except Exception:
+        return "error"
+
+
+def _profile_stats(profile: dict) -> None:
+    c = profile_completeness(profile)
+    print("\n--- PROFILE EXTRACTION QUALITY " + "-" * 41)
+    print(f"  completeness : {c['completeness']:.0%}  ({c['fields_filled']}/{c['fields_total']} fields filled)")
+    print(f"  flags raised : {c['flags']}")
+    if c["completeness"] < 0.6:
+        print("  (!) low completeness -- extraction may have missed sections; inspect the resume/parse.")
+
+
 def _ranking_stats(ranked: list[dict]) -> None:
     sims = [r["similarity_score"] for r in ranked]
     llms = [r["llm_score"] / 100 for r in ranked]
-    print("\n--- RANKING STATISTICS " + "-" * 48)
-    print(f"  postings evaluated : {len(ranked)}")
+    q = ranking_quality(ranked)
+    print("\n--- RANKING QUALITY " + "-" * 51)
+    print(f"  postings evaluated : {q['count']}")
     print(f"  similarity  mean/min/max : {statistics.mean(sims):.3f} / {min(sims):.3f} / {max(sims):.3f}")
     print(f"  llm score   mean/min/max : {statistics.mean(llms):.3f} / {min(llms):.3f} / {max(llms):.3f}")
-    if len(ranked) >= 3 and statistics.pstdev(sims) > 0 and statistics.pstdev(llms) > 0:
-        corr = statistics.correlation(sims, llms)
-        print(f"  embedding vs LLM-judge agreement (Pearson r): {corr:.3f}")
-        if corr < 0.2:
-            print("  (!) low agreement -- embedding and LLM scores rank jobs differently; inspect rationales.")
+    print(f"  combined    mean/stdev   : {q['combined_mean']:.3f} / {q['combined_stdev']:.3f}")
+    print(f"  separation (top - median): {q['top_minus_median_gap']:.3f}")
+    if q["combined_stdev"] < 0.05:
+        print("  (!) low separation -- jobs score too similarly; the ranking barely discriminates.")
+    spearman = q["spearman_embedding_vs_llm"]
+    if spearman is not None:
+        print(f"  embedding vs LLM rank agreement (Spearman): {spearman:.3f}")
+        if spearman < 0.2:
+            print("  (!) low agreement -- the two methods rank jobs differently; inspect rationales.")
 
 
 def _groundedness_eval(profile: dict, ranked: list[dict]) -> None:
@@ -116,6 +159,26 @@ def _groundedness_eval(profile: dict, ranked: list[dict]) -> None:
         print(f"   {mark} [{verdict:<10}] {title[:60]}")
 
 
+def _cover_letter_eval(profile: dict, ranked: list[dict], thread_id: str) -> None:
+    print("\n--- COVER LETTER QUALITY (Phase B) " + "-" * 35)
+    top_job_id = ranked[0]["job"]["id"]
+    print(f"  generating a cover letter for the top match (job {top_job_id})...")
+    phase_b = asyncio.run(run_phase_b(thread_id, top_job_id))
+    letter = (phase_b.get("cover_letter") or {}).get("letter_text", "")
+    if not letter:
+        print(f"  (!) no letter produced: {phase_b.get('error')}")
+        return
+
+    checks = cover_letter_checks(letter, profile.get("name"))
+    print(f"  word count      : {checks['word_count']} (within 200-500: {checks['within_length']})")
+    print(f"  first person    : {checks['is_first_person']} ({checks['first_person_hits']} I/my/me hits)")
+    print(f"  3rd-person self : {checks['third_person_self_reference']}  (should be False)")
+
+    verdict = _judge_cover_letter(profile, letter)
+    mark = "+" if verdict == "faithful" else "-"
+    print(f"  faithfulness (LLM-judge, no invented credentials): {mark} [{verdict}]")
+
+
 def main() -> None:
     resume_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("sample_data/sample_resume.pdf")
     desired_title = sys.argv[2] if len(sys.argv) > 2 else "Data Analyst"
@@ -124,9 +187,10 @@ def main() -> None:
         sys.exit(1)
 
     metrics.reset()
+    thread_id = new_thread_id()
     print(f"Evaluating pipeline on {resume_path.name!r} for title {desired_title!r}...\n")
     result = asyncio.run(
-        run_phase_a(resume_path.read_bytes(), desired_title, "", new_thread_id(), resume_filename=resume_path.name)
+        run_phase_a(resume_path.read_bytes(), desired_title, "", thread_id, resume_filename=resume_path.name)
     )
     # (run_phase_a already printed the per-agent/LLM metrics summary table)
 
@@ -139,8 +203,10 @@ def main() -> None:
         print("No ranked results to evaluate.", file=sys.stderr)
         sys.exit(1)
 
+    _profile_stats(result["profile"])
     _ranking_stats(ranked)
     _groundedness_eval(result["profile"], ranked)
+    _cover_letter_eval(result["profile"], ranked, thread_id)
     print("\nEvaluation complete.")
 
 

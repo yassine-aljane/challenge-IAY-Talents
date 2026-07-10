@@ -87,7 +87,8 @@ messages. This is what makes the collaboration traceable.
 | `llm_client.py` | Groq wrapper: multi-key fallback, JSON/text/vision calls, token metering |
 | `embeddings.py` | Local sentence-transformers cosine similarity (no API key) |
 | `harness.py` | Uniform agent execution wrapper + lifecycle hooks |
-| `metrics.py` | Per-agent + per-LLM metrics, console summary |
+| `metrics.py` | Operational per-agent + per-LLM metrics, console summary |
+| `quality.py` | Quality metrics (completeness, ranking separation, cover-letter checks) |
 | `logging_utils.py` | Redacted A2A message trace |
 
 ---
@@ -289,18 +290,34 @@ Plus **MCP isolation** (stdio-only, sanitized inputs, allowlisted hosts) and
 
 ## 11. Observability and evaluation
 
-Three layers, all **console-only** (deliberately not in the UI):
+All **console-only** (deliberately not in the UI). Two kinds of metric:
+*operational* (cost/speed, recorded live) and *quality* (computed from the
+outputs).
 
-1. **Metrics** (`common/metrics.py`) — after each phase, a table prints
-   per-agent calls/errors/latency and per-model LLM calls/tokens/key-rotations.
-2. **LangSmith tracing** — when `LANGSMITH_TRACING=true`, the whole LangGraph
-   run (nodes, harness agent spans, every Groq call) appears as a run tree in
-   the LangSmith UI.
-3. **LLM-as-judge evaluation** (`scripts/evaluate_langsmith.py`) — runs Phase A,
-   then reports ranking statistics (including the **embedding vs LLM-judge
-   agreement**, Pearson r) and a groundedness check where an independent judge
-   classifies each rationale as *grounded* or *ungrounded* (catches
-   hallucinated rationales). These judge calls are also traced by LangSmith.
+**Operational** (`common/metrics.py`) — after each phase, a table prints
+per-agent calls/errors/latency and per-model LLM calls/tokens/key-rotations.
+
+**Quality** (`common/quality.py`, pure functions, no LLM) — each targets a
+place the pipeline can actually fail:
+
+| Metric | Measures | Why |
+|--------|----------|-----|
+| **Profile completeness** | fraction of profile fields filled + flag count | catches a weak/partial extraction quantitatively |
+| **Score separation** | stdev of `combined_score` + top-minus-median gap | a ranking where every job scores ~80 doesn't discriminate |
+| **Spearman rank agreement** | do embedding and LLM scores *order* jobs the same? | ranking is about order — Spearman is correct where Pearson on raw scores misleads |
+| **Cover-letter checks** | word count, first-person voice, no 3rd-person self-reference | guards the letter format (incl. the first-person requirement) cheaply |
+
+**LLM-as-judge** (`scripts/evaluate_langsmith.py`, traced by LangSmith) — two
+independent judges catch hallucination in the two generated outputs:
+
+- **Rationale groundedness** — is each match rationale grounded in the profile
+  *and* the job description (no invented skills / requirements)?
+- **Cover-letter faithfulness** — does the letter claim only credentials that
+  exist in the profile (no fabricated experience)?
+
+**LangSmith tracing** — when `LANGSMITH_TRACING=true`, the whole LangGraph run
+(nodes, harness agent spans, every Groq call, and the judge calls) appears as a
+run tree in the LangSmith UI.
 
 ---
 
